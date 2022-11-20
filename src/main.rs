@@ -1,8 +1,10 @@
+use std::borrow::Cow;
 use std::fs::File;
-use std::io;
-use std::io::{Error, Write};
+use std::io::{Write};
+use std::process::Command;
 use clap::{Parser, Subcommand, ValueEnum, ValueHint};
 use ethers::types::H160;
+use serde_json::Value;
 
 #[derive(Debug, Clone, ValueEnum)]
 enum Chains {
@@ -24,10 +26,13 @@ struct SourceArgs {
     chain: Chains,
     /// address of the contract to be downloaded
     address: ethers::types::H160,
-    /// file path, default will be current directory and combination of chain and address.
-    /// Directory will be created if doesn't exist
-    #[clap(long, value_hint = ValueHint::FilePath, value_name = "PATH")]
-    file_path: Option<String>,
+    /// directory path, default will be current directory. directory will be created if doesn't exist
+    #[clap(long, default_value = ".",value_hint = ValueHint::DirPath, value_name = "DIR")]
+    dir: String,
+    /// file name, will default to {chain}_{address}.sol; if the source consists of multiple files,
+    /// the files will be put into a directory with this name, or defaulting to {chain}_{address}
+    #[clap(long, value_name = "FILE_NAME")]
+    file_name: Option<String>,
     /// Open the downloaded file in VsCode
     #[clap(long, value_name = "SIGNATURE")]
     open_vscode: bool,
@@ -49,7 +54,6 @@ enum Subcommands {
     DeployerInfo,
 }
 
-
 fn main() -> eyre::Result<()> {
 
     //utils::load_dotenv(); //TODO: create env. file with apikeys?
@@ -58,7 +62,7 @@ fn main() -> eyre::Result<()> {
 
     match cli.subcommand {
         Subcommands::Source(args) => {
-            unimplemented!("donwloading source")
+            handle_source(&args);
         }
         Subcommands::ContractInfo => {
             unimplemented!("Getting contract info")
@@ -71,24 +75,100 @@ fn main() -> eyre::Result<()> {
     Ok(())
 }
 
-fn write_to_file(file_path_string: &str, file_content: &str) -> Result<(), Error>{
-    let path = std::path::Path::new(file_path_string);
-
-    // creates the full directory path, if it does not exist
-    let prefix = path.parent().unwrap();
-    std::fs::create_dir_all(prefix).unwrap();
-
-    let mut output = File::create(path)?;
-    output.write(file_content.as_bytes())?;
-
-    Ok(())
+fn handle_source(args: &SourceArgs){
+    match get_source(&args.chain, &args.address) {
+        Ok(source) => {
+            write_source_to_disk(&args, &source);
+            if args.open_vscode {
+                Command::new("code").arg(&args.dir);
+            }
+        }
+        Err(error) => { eprintln!("Couldnt download source. Error: {error}")}
+    }
 }
 
-fn get_source(chain: Chains, address: H160){
-    unimplemented!("download contract source code");
-    match chain {
-        Chains::Ethereum => {}
-        Chains::Bnb => {}
-        Chains::Polygon => {}
+fn write_source_to_disk(args: &SourceArgs, source: &str){
+    let is_single_file = source_is_single_file(source);
+
+    let file_name =
+        if let Some(passed_name) = &args.file_name {
+            Cow::Borrowed(passed_name)
+        } else {
+            let file_ending = if is_single_file {".sol"} else { "" };
+            Cow::Owned(format!("{:?}_{:?}{:?}", &args.chain, &args.address, file_ending))
+        };
+    let full_path = format!("{}/{}", args.dir, file_name);
+    let path = std::path::Path::new(&full_path);
+
+    if is_single_file {
+
     }
+
+
+
+    // creates the full directory path, if it does not exist
+    // let prefix = path.parent().unwrap();
+    // std::fs::create_dir_all(prefix).unwrap();
+    //
+    // let mut output = File::create(path).expect("creating file failed");
+    // output.write(file_content.as_bytes()).expect("writing file failed");
+}
+
+
+fn source_is_single_file(source: &str) -> bool {
+    // based on https://github.com/amimaro/smart-contract-downloader/commit/fafc613e82e457098005442afa5d1e0037d962d6
+    return source.starts_with("pragma") ||
+        source.starts_with("//") ||
+        source.starts_with("\r\n") ||
+        source.starts_with("/*")
+
+    //alternatively:
+    // return !(source.starts_with("{{") && source.ends_with("}}"))
+}
+
+fn get_source(chain: &Chains, address: &H160) -> eyre::Result<String>{
+    match chain {
+        Chains::Ethereum => {
+            let url = format!("https://api.etherscan.io/api?module=contract&\
+                                action=getsourcecode&address={:?}", address);
+            let json_str = reqwest::blocking::get(url)?.text()?;
+            let parsed: serde_json::Value = serde_json::from_str(&json_str)?;
+            let source_value = &parsed["result"][0]["SourceCode"];
+            match source_value {
+                Value::String(source_string) => {
+                    Ok(source_string.to_string())
+                }
+                _ => {panic!("unexpected serde_json variant in api response")}
+            }
+        }
+        Chains::Bnb => {unimplemented!("download from bnb explorer")}
+        Chains::Polygon => {unimplemented!("download from polygon explorer")}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{Chains, get_source, H160};
+
+    #[test]
+    fn it_works(){
+        let address = "0xe2f3eabd10fd1206a2ce0353eebd385fde8c71d7";
+        let url = format!("https://api.etherscan.io/api?module=contract&\
+                                action=getsourcecode&address={}", address);
+        let json_str = reqwest::blocking::get(url).unwrap().text().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        let source_string = parsed["result"][0]["SourceCode"].as_str().unwrap();
+        println!("{source_string}");
+        let parsed_source: serde_json::Value = serde_json::from_str(source_string).unwrap();
+
+        match &parsed_source {
+            serde_json::Value::String(string) => {println!("value is string")}
+            serde_json::Value::Object(map) => {println!("value is object")}
+            _ => {panic!("unexpected json type")}
+        }
+
+        // println!("{}", parsed_source["sources"]["/contracts/contract/RocketBase.sol"]);
+        // println!("{:?}", serde_json::from_str::<&str>(&format!("\"{}\"", parsed_source)).unwrap());
+    }
+
 }
