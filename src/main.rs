@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::fmt::format;
 use std::fs::File;
 use std::io::{Write};
 use std::process::Command;
@@ -28,11 +29,11 @@ struct SourceArgs {
     address: ethers::types::H160,
     /// directory path, default will be current directory. directory will be created if doesn't exist
     #[clap(long, default_value = ".",value_hint = ValueHint::DirPath, value_name = "DIR")]
-    dir: String,
-    /// file name, will default to {chain}_{address}.sol; if the source consists of multiple files,
-    /// the files will be put into a directory with this name, or defaulting to {chain}_{address}
+    parent_dir: String,
+    /// name of the file (if single file) or directory, where the source will be stored. For single
+    /// files, the ending ".sol" will be appended.
     #[clap(long, value_name = "FILE_NAME")]
-    file_name: Option<String>,
+    destination: Option<String>,
     /// Open the downloaded file in VsCode
     #[clap(long, value_name = "SIGNATURE")]
     open_vscode: bool,
@@ -80,7 +81,7 @@ fn handle_source(args: &SourceArgs){
         Ok(source) => {
             write_source_to_disk(&args, &source);
             if args.open_vscode {
-                Command::new("code").arg(&args.dir);
+                Command::new("code").arg(&args.parent_dir);
             }
         }
         Err(error) => { eprintln!("Couldnt download source. Error: {error}")}
@@ -91,39 +92,54 @@ fn write_source_to_disk(args: &SourceArgs, source: &str){
     let is_single_file = source_is_single_file(source);
 
     let file_name =
-        if let Some(passed_name) = &args.file_name {
-            Cow::Borrowed(passed_name)
+        if let Some(passed_name) = &args.destination {
+            if is_single_file {
+                Cow::Owned(format!("{passed_name}.sol"))
+            } else {
+                Cow::Borrowed(passed_name)
+            }
         } else {
             let file_ending = if is_single_file {".sol"} else { "" };
             Cow::Owned(format!("{:?}_{:?}{:?}", &args.chain, &args.address, file_ending))
         };
-    let full_path = format!("{}/{}", args.dir, file_name);
-    let path = std::path::Path::new(&full_path);
 
     if is_single_file {
-
+        let path_str = format!("{}/{}", args.parent_dir, file_name);
+        let path = std::path::Path::new(&path_str);
+        // creates the full directory path, if it does not exist
+        let prefix = path.parent().unwrap();
+        std::fs::create_dir_all(prefix).unwrap();
+        let mut output = File::create(path).expect("file should be created");
+        output.write(source.as_bytes()).expect("file should be written to");
+    } else {
+        //remove redundant curly braces
+        let source = &source[1..source.len() - 1];
+        let source_value: Value = serde_json::from_str(source).expect("source should be valid json");
+        let source_iterable = source_value["sources"].as_object().expect("value should be convertable to object");
+        for (source_file_path, source_file_object) in source_iterable{
+            if let Value::String(source_file_string) = &source_file_object["content"]{
+                let path_str = format!("{}/{}{}", args.parent_dir, file_name, source_file_path);
+                let path = std::path::Path::new(&path_str);
+                let prefix = path.parent().unwrap();
+                std::fs::create_dir_all(prefix).unwrap();
+                let mut output = File::create(path).expect("file should be created");
+                output.write(source_file_string.as_bytes()).expect("file should be written to");
+            }
+        }
     }
 
-
-
-    // creates the full directory path, if it does not exist
-    // let prefix = path.parent().unwrap();
-    // std::fs::create_dir_all(prefix).unwrap();
-    //
-    // let mut output = File::create(path).expect("creating file failed");
-    // output.write(file_content.as_bytes()).expect("writing file failed");
 }
 
 
 fn source_is_single_file(source: &str) -> bool {
     // based on https://github.com/amimaro/smart-contract-downloader/commit/fafc613e82e457098005442afa5d1e0037d962d6
-    return source.starts_with("pragma") ||
-        source.starts_with("//") ||
-        source.starts_with("\r\n") ||
-        source.starts_with("/*")
+    // return source.starts_with("pragma") ||
+    //     source.starts_with("//") ||
+    //     source.starts_with("\r\n") ||
+    //     source.starts_with("/*")
 
-    //alternatively:
-    // return !(source.starts_with("{{") && source.ends_with("}}"))
+    // alternatively:
+    return !(source.starts_with("{{") && source.ends_with("}}"))
 }
 
 fn get_source(chain: &Chains, address: &H160) -> eyre::Result<String>{
@@ -148,27 +164,10 @@ fn get_source(chain: &Chains, address: &H160) -> eyre::Result<String>{
 
 #[cfg(test)]
 mod tests {
-    use crate::{Chains, get_source, H160};
 
     #[test]
     fn it_works(){
-        let address = "0xe2f3eabd10fd1206a2ce0353eebd385fde8c71d7";
-        let url = format!("https://api.etherscan.io/api?module=contract&\
-                                action=getsourcecode&address={}", address);
-        let json_str = reqwest::blocking::get(url).unwrap().text().unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
-        let source_string = parsed["result"][0]["SourceCode"].as_str().unwrap();
-        println!("{source_string}");
-        let parsed_source: serde_json::Value = serde_json::from_str(source_string).unwrap();
 
-        match &parsed_source {
-            serde_json::Value::String(string) => {println!("value is string")}
-            serde_json::Value::Object(map) => {println!("value is object")}
-            _ => {panic!("unexpected json type")}
-        }
-
-        // println!("{}", parsed_source["sources"]["/contracts/contract/RocketBase.sol"]);
-        // println!("{:?}", serde_json::from_str::<&str>(&format!("\"{}\"", parsed_source)).unwrap());
     }
 
 }
